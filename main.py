@@ -1,4 +1,5 @@
 import numpy as np
+import time
 
 
 class SmoothnessBase():
@@ -22,6 +23,8 @@ class SmoothnessBase():
         else:
             self.__alphaIsList = False
             self.alpha = alpha
+        
+        self.lastUpdateTime = time.time()*1000.0
                 
 
 
@@ -48,16 +51,23 @@ class SmoothnessBase():
     def _addNewSmoothness(self, newDerivatives: np.ndarray):
         self.smoothness = (1 - self.alpha) * self.smoothness + self.alpha * newDerivatives
 
-    def addNewValue(self, newValue: float, newDelta: float):
+    def addNewValue(self, newValue: float, newDelta: float=None):
+        
+        newTime = time.time()*1000.0
+        if newDelta is None:
+            newDelta = newTime - self.lastUpdateTime
+            
         self._addNewDelta(newDelta)
         newDerivatives = self._addNewDerivative(newValue, newDelta)
         self._addNewSmoothness(newDerivatives)
+
+        self.lastUpdateTime = newTime
 
 
 
 class Smoothness():
 
-    MIDI_MAX : int = 137
+    MIDI_MAX : int = 127
 
     CHANNELS = {
         "CC16_1": "gyro x left",
@@ -93,7 +103,8 @@ class Smoothness():
             smoothnessTypes: str or list[str],
             cacheLengths: None or int or list[int] = None, 
             derivativeDegrees: None or int or list[int] = None, 
-            alphas: None or float or list[float] = None):
+            alphas: None or float or list[float] = None,
+            customMidiMax: None or int = None):
         
         isNotAdmissibleSmoothnessType : bool = False
         if isinstance(smoothnessTypes, list):
@@ -104,6 +115,10 @@ class Smoothness():
         if isNotAdmissibleSmoothnessType:
             raise Smoothness.NotAdmissibleType
         
+        if customMidiMax is not None:
+            self.midiMax = customMidiMax
+        else:
+            self.midiMax = Smoothness.MIDI_MAX
 
         if isinstance(smoothnessTypes, list):
             self.smoothnessTypes = smoothnessTypes
@@ -146,23 +161,48 @@ class Smoothness():
             del self.alphas[smoothnessType]     
 
 
-    def addNewValues(self, channelData: dict[int, float]):
-        pass
+    def addNewValues(self, channelData: dict[int, float], returnSmoothness: bool = False):
+        for smoothnessType in self.data.keys():
+            newValue = self.conversion(smoothnessType, channelData)
+            self.data[smoothnessType].addNewValue(newValue)
+        if returnSmoothness:
+            return self.getSmoothnessMeasure()
+        
+
+    def getSmoothnessMeasure(self):
+        return {t:np.sum(v.smoothness**2) for t, v in self.data.items()}
+        
 
 
 
     def conversion(self, smoothnessType: str, data: dict[int, float]):
         if (smoothnessType=="GYRO_LEFT"):
-            return data["CC16_1"] * 2 * np.pi / Smoothness.MIDI_MAX
+            theta = data["CC16_1"] * 2 * np.pi / self.midiMax
+            phi = data["CC17_1"] * 2 * np.pi / self.midiMax
+            psi = data["CC18_1"] * 2 * np.pi / self.midiMax
+            return np.sqrt(theta**2 + phi**2 + psi**2)
+        elif (smoothnessType=="GYRO_RIGHT"):
+            theta = data["CC16_2"] * 2 * np.pi / self.midiMax
+            phi = data["CC17_2"] * 2 * np.pi / self.midiMax
+            psi = data["CC18_2"] * 2 * np.pi / self.midiMax
+            return np.sqrt(theta**2 + phi**2 + psi**2)
+        elif (smoothnessType=="VEL_LEFT"):
+            return data["CC22_1"] / self.midiMax
+        elif (smoothnessType=="VEL_RIGHT"):
+            return data["CC22_2"] / self.midiMax
+        elif (smoothnessType=="VEL_AVG"):
+            return (data["CC22_1"] + data["CC22_2"] ) / (2 * self.midiMax)
+        if (smoothnessType=="ACCEL_LEFT"):
+            ax = data["CC19_1"]  / self.midiMax
+            ay = data["CC20_1"]  / self.midiMax
+            az = data["CC21_1"]  / self.midiMax
+            return np.sqrt(ax**2 + ay**2 + az**2)
+        elif (smoothnessType=="ACCEL_RIGHT"):
+            ax = data["CC19_2"] / self.midiMax
+            ay = data["CC20_2"] / self.midiMax
+            az = data["CC21_2"] / self.midiMax
+            return np.sqrt(ax**2 + ay**2 + az**2)
         
-        "GYRO_LEFT",
-        "GYRO_RIGHT",
-        "VEL_LEFT",
-        "VEL_RIGHT",
-        "VEL_AVG",
-        "ACCEL_LEFT",
-        "ACCEL_RIGHT"
-    
         
 
 
