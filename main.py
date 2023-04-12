@@ -1,6 +1,28 @@
 import numpy as np
 import time
 
+MIDI_MAX : int = 127
+
+INITIAL_SIGMOID_CALIBRATION = {
+                    "XMIN": 0,
+                    "XMAX": 0,
+                    "YMIN": 0,
+                    "YMAX": MIDI_MAX,
+                    "BETA": 0.02}
+
+INITIAL_SMOOTHNESS_VALUES = {
+                "raw": 0,
+                "calibration": INITIAL_SIGMOID_CALIBRATION,
+                "calibratedSignal": 0,
+                "isCalibrated" : False}
+
+def sigmoid(x:float, YMAX:float, YMIN:float, XMAX:float, XMIN:float, BETA=0.02):
+    """ Implements a simple sigmoid function
+    """
+    MU = (XMAX - XMIN) / 2
+    ALPHA = np.log((1-BETA) / BETA) / MU
+    return YMIN + (YMAX-  YMIN) / (1 + np.exp((-1)* ALPHA * (x - MU)))
+
 
 class SmoothnessBase():
 
@@ -13,6 +35,10 @@ class SmoothnessBase():
         self.cacheLength = cacheLength
         self.derivativeDegree = derivativeDegree
         self.smoothness = np.zeros(self.derivativeDegree + 1)
+        self.smoothnessMeasures = {
+            "overall": INITIAL_SMOOTHNESS_VALUES,
+            "relative": INITIAL_SMOOTHNESS_VALUES, 
+            "secondOrder": INITIAL_SMOOTHNESS_VALUES}
         self.derivatives = np.zeros((self.derivativeDegree + 1, self.cacheLength), float)  
         self.deltas = np.zeros(cacheLength, float)
         if isinstance(alpha, list):
@@ -51,6 +77,19 @@ class SmoothnessBase():
     def _addNewSmoothness(self, newDerivatives: np.ndarray):
         self.smoothness = (1 - self.alpha) * self.smoothness + self.alpha * newDerivatives
 
+    def _updateSmoothnessMeasures(self):
+        ## update all the smoothness measures
+        self.smoothnessMeasures["overall"]["raw"] = np.sqrt(np.sum(self.smoothness[1:]**2))
+        self.smoothnessMeasures["relative"]["raw"] = np.abs(self.smoothness[2] - self.smoothness[1]**2)
+        self.smoothnessMeasures["secondOrder"]["raw"] = np.abs(self.smoothness[2])
+        for measure in ["overall", "relative", "secondOrder"] :
+            if (self.smoothnessMeasures[measure]["isCalibrated"]):
+                self.smoothnessMeasures[measure]["calibratedSignal"] = sigmoid(
+                    x=self.smoothnessMeasures[measure]["raw"], 
+                    **self.smoothnessMeasures[measure]["calibration"])
+        
+        
+
     def addNewValue(self, newValue: float, newDelta: float=None):
         
         newTime = time.time()*1000.0
@@ -60,14 +99,36 @@ class SmoothnessBase():
         self._addNewDelta(newDelta)
         newDerivatives = self._addNewDerivative(newValue, newDelta)
         self._addNewSmoothness(newDerivatives)
+        self._updateSmoothnessMeasures()
 
         self.lastUpdateTime = newTime
 
 
+    def getSmoothness(self, smoothnessMeasure="overall"):
+        return {
+            "raw": self.smoothnessMeasures[smoothnessMeasure]["raw"],
+            "calibratedSignal": self.smoothnessMeasures[smoothnessMeasure]["calibratedSignal"]
+        }
+    
+    def calibrateSignal(self, XMAX:float, XMIN:float, BETA:float=0.02, YMIN:float=0, YMAX:float=MIDI_MAX, smoothnessMeasure: str="overall"):
+        self.smoothnessMeasures[smoothnessMeasure]["calibration"] = {
+            "XMAX": XMAX, 
+            "XMIN": XMIN, 
+            "YMIN": YMIN,
+            "YMAX": YMAX,
+            "BETA": BETA}
+        self.smoothnessMeasures[smoothnessMeasure]["isCalibrated"] = True 
+
+    
+    def decalibrateSignal(self, smoothnessMeasure: str="overall"):
+        self.smoothnessMeasures[smoothnessMeasure]["isCalibrated"] = False 
+
+
+
+
+
 
 class Smoothness():
-
-    MIDI_MAX : int = 127
 
     CHANNELS = {
         "CC16_1": "gyro x left",
@@ -118,17 +179,20 @@ class Smoothness():
         if customMidiMax is not None:
             self.midiMax = customMidiMax
         else:
-            self.midiMax = Smoothness.MIDI_MAX
+            self.midiMax = MIDI_MAX
 
         if isinstance(smoothnessTypes, list):
             self.smoothnessTypes = smoothnessTypes
         else :
             self.smoothnessTypes = [smoothnessTypes]
         
+        self.currentDefaultSmoothnessMeasure = "overall"
+
         self.data : dict[str, SmoothnessBase] = {}
         self.cacheLengths : dict[str, int] = {}
         self.derivativeDegrees : dict[str, int] = {}
         self.alphas : dict[str, float or list[float]] = {}
+
 
         if (cacheLengths is not None) and (derivativeDegrees is not None) and (alphas is not None): 
             if isinstance(cacheLengths,int):
@@ -169,23 +233,57 @@ class Smoothness():
             return self.getSmoothnessMeasure()
         
 
-    def getSmoothnessMeasure(self):
-        return {t:np.sum(v.smoothness**2) for t, v in self.data.items()}
+    def getSmoothnessMeasure(self, smoothnessMeasure=None):
+        smoothnessMeasure = (self.currentDefaultSmoothnessMeasure if smoothnessMeasure is None else smoothnessMeasure)
+        return  { 
+            smoothnessType: (
+                {
+                    "raw": smoothnessObject.smoothnessMeasures[smoothnessMeasure]["raw"],
+                    "calibratedSignal": smoothnessObject.smoothnessMeasures[smoothnessMeasure]["calibratedSignal"]
+                }
+                if smoothnessObject.smoothnessMeasures[smoothnessMeasure]["isCalibrated"]
+                else {"raw": smoothnessObject.smoothnessMeasures[smoothnessMeasure]["raw"]})
+            for smoothnessType, smoothnessObject in self.data.items()}
         
 
+    def calibrateSmoothness(self, smoothnessTypes: str or list[str], minsAndMaxs: list[int] or list[list[int]], smoothnessMeasure: str="overall"):
+        if isinstance(smoothnessTypes, str):
+            self.data[smoothnessTypes].calibrateSignal(XMIN=minsAndMaxs[0], XMAX=minsAndMaxs[1], smoothnessMeasure=smoothnessMeasure)
+        else:
+            if len(smoothnessTypes)!=len(minsAndMaxs):
+                raise Exception("arrays should be of equal lengths")
+            for sT, minMAx in zip(smoothnessTypes, minsAndMaxs):
+                self.data[sT].calibrateSignal(XMIN=minMAx[0], XMAX=minMAx[1], smoothnessMeasure=smoothnessMeasure)
+
+
+    def changeCurrentDefaultSmoothnessMeasure(self, newSmoothnessMeasure="overall"):
+        self.currentDefaultSmoothnessMeasure = newSmoothnessMeasure
 
 
     def conversion(self, smoothnessType: str, data: dict[int, float]):
         if (smoothnessType=="GYRO_LEFT"):
+
             theta = data["CC16_1"] * 2 * np.pi / self.midiMax
             phi = data["CC17_1"] * 2 * np.pi / self.midiMax
             psi = data["CC18_1"] * 2 * np.pi / self.midiMax
-            return np.sqrt(theta**2 + phi**2 + psi**2)
+            # y = np.sin(theta)
+            # z = np.cos(theta)
+            # x = np.cos(phi)
+            # z = np.sin(phi)
+            # x = np.sin(psi)
+            # y = np.cos(psi)
+            x = np.cos(phi) + np.sin(psi)
+            y = np.sin(theta) + np.cos(psi)
+            z = np.cos(theta) + np.sin(phi)
+            return np.sqrt(x**2 + y**2 + z**2)
         elif (smoothnessType=="GYRO_RIGHT"):
             theta = data["CC16_2"] * 2 * np.pi / self.midiMax
             phi = data["CC17_2"] * 2 * np.pi / self.midiMax
             psi = data["CC18_2"] * 2 * np.pi / self.midiMax
-            return np.sqrt(theta**2 + phi**2 + psi**2)
+            x = np.cos(phi) + np.sin(psi)
+            y = np.sin(theta) + np.cos(psi)
+            z = np.cos(theta) + np.sin(phi)
+            return np.sqrt(x**2 + y**2 + z**2)
         elif (smoothnessType=="VEL_LEFT"):
             return data["CC22_1"] / self.midiMax
         elif (smoothnessType=="VEL_RIGHT"):
