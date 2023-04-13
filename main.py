@@ -25,6 +25,10 @@ def sigmoid(x:float, YMAX:float, YMIN:float, XMAX:float, XMIN:float, BETA=0.02):
 
 
 class SmoothnessBase():
+    """It creates instances that can deal with smoothness.
+    In particular it takes new values and calculates the smoothness of them.
+    It is agnostic to the source of the data.
+    """
 
     
     def __init__(self, 
@@ -50,6 +54,7 @@ class SmoothnessBase():
             self.__alphaIsList = False
             self.alpha = alpha
         
+        ## lastUpdateTime is in milliseconds
         self.lastUpdateTime = time.time()*1000.0
                 
 
@@ -90,11 +95,22 @@ class SmoothnessBase():
         
         
 
-    def addNewValue(self, newValue: float, newDelta: float=None):
+    def addNewValue(self, newValue: float, newDelta: float=None, newTime: float=None):
         
-        newTime = time.time()*1000.0
-        if newDelta is None:
-            newDelta = newTime - self.lastUpdateTime
+        currentTime = time.time()*1000.0
+        if newDelta is None and newTime is None:
+            newDelta = currentTime - self.lastUpdateTime
+            newTime = currentTime
+        elif newDelta is None and newTime is not None:
+            currentTime = newTime 
+            newDelta = currentTime - self.lastUpdateTime
+        elif newDelta is not None and newTime is None:
+            currentTime = self.lastUpdateTime + newDelta
+        else:
+            raise Exception("Cant have both new Delta and new Time")
+
+
+
             
         self._addNewDelta(newDelta)
         newDerivatives = self._addNewDerivative(newValue, newDelta)
@@ -225,10 +241,14 @@ class Smoothness():
             del self.alphas[smoothnessType]     
 
 
-    def addNewValues(self, channelData: dict[int, float], returnSmoothness: bool = False):
+    def addNewValues(self, 
+                     channelData: dict[int, float],
+                     newTime: float = None, 
+                     newDelta: float = None, 
+                     returnSmoothness: bool = False):
         for smoothnessType in self.data.keys():
             newValue = self.conversion(smoothnessType, channelData)
-            self.data[smoothnessType].addNewValue(newValue)
+            self.data[smoothnessType].addNewValue(newValue, newTime=newTime, newDelta=newDelta)
         if returnSmoothness:
             return self.getSmoothnessMeasure()
         
