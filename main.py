@@ -24,6 +24,9 @@ def sigmoid(x:float, YMAX:float, YMIN:float, XMAX:float, XMIN:float, BETA=0.02):
     return YMIN + (YMAX-  YMIN) / (1 + np.exp((-1)* ALPHA * (x - MU)))
 
 
+
+
+
 class SmoothnessBase():
     """It creates instances that can deal with smoothness.
     In particular it takes new values and calculates the smoothness of them.
@@ -160,7 +163,7 @@ class Smoothness():
         "CC21_1": "accel z left",
         "CC21_2": "accel z right",
         "CC22_1": "vel left",
-        "CC22_2": "vel right",
+        "CC22_2": "vel right"
     }
 
     SMOOTHNESS_TYPES = [
@@ -170,7 +173,8 @@ class Smoothness():
         "VEL_RIGHT",
         "VEL_AVG",
         "ACCEL_LEFT",
-        "ACCEL_RIGHT"
+        "ACCEL_RIGHT",
+        "ACCEL_X"
     ]
     
     NotAdmissibleType : Exception = Exception("Smoothness Type needs to be any of the admissible smoothness types: " + SMOOTHNESS_TYPES.__repr__())
@@ -221,9 +225,20 @@ class Smoothness():
             for tp, L, D, alpha in zip(self.smoothnessTypes, cacheLengths, derivativeDegrees, alphas):
                 self.initSmoothnessType(tp, L, D, alpha)
 
+        ## Instance specific smoothness types
+        # self.smoothnessTypes = Sm##<#
+        self.smoothnessConversion = {smtype:self.conversion(smtype) for smtype in self.smoothnessTypes}
+        self.channels = Smoothness.CHANNELS
+
+    def gyrocorrection(self, channel: str ):
+        if 'gyro' in self.channels[channel]:
+            return lambda x: (np.sin(x) * 2 * np.pi / self.midiMax) 
+        else :
+            return lambda x: x
+
 
     def initSmoothnessType(self, smoothnessType, cacheLength: int, derivativeDegree: int, alpha: float or list[float]):
-        if smoothnessType not in Smoothness.SMOOTHNESS_TYPES:
+        if smoothnessType not in self.smoothnessTypes:
             raise Smoothness.NotAdmissibleType
         if smoothnessType in self.data:
             raise Exception("Cannot add this type. It's already been added.")
@@ -247,7 +262,8 @@ class Smoothness():
                      newDelta: float = None, 
                      returnSmoothness: bool = False):
         for smoothnessType in self.data.keys():
-            newValue = self.conversion(smoothnessType, channelData)
+            conversionFnct = self.smoothnessConversion[smoothnessType]
+            newValue = conversionFnct(channelData)
             self.data[smoothnessType].addNewValue(newValue, newTime=newTime, newDelta=newDelta)
         if returnSmoothness:
             return self.getSmoothnessMeasure()
@@ -279,47 +295,82 @@ class Smoothness():
     def changeCurrentDefaultSmoothnessMeasure(self, newSmoothnessMeasure="overall"):
         self.currentDefaultSmoothnessMeasure = newSmoothnessMeasure
 
+    def addChannel(self, name: str, description: str):
+        self.channels[name] = description
 
-    def conversion(self, smoothnessType: str, data: dict[int, float]):
+    def removeChannel(self, name: str, description: str):
+        del self.channels[name]
+
+    def addSmoothnessType(self, name: str, function):
+        self.smoothnessTypes.append(name)
+        self.smoothnessConversion[name] = function
+
+    def addAndInitSmoothnessType(self, name: str, function, smoothnessType, cacheLength: int, derivativeDegree: int, alpha: float or list[float]):
+        self.addSmoothnessType(name, function)
+        self.initSmoothnessType(name, cacheLength=cacheLength, derivativeDegree=derivativeDegree, alpha=alpha)
+
+    def removeSmoothnessType(self, name:str ):
+        del self.smoothnessConversion[name]
+        ## remove from a list
+        self.smoothnessTypes.remove(name)
+
+    def smoothnessConversionTemplate(self, data: dict[int, float], channels: list[str]= [], aggregationType: str="euclidean"):
+        if aggregationType=="euclidean":
+            return np.sqrt(np.sum(np.array([self.gyrocorrection(channel)(data[channel]) for channel in channels])**2))
+        if aggregationType=="linear":
+            return np.sum(np.array([np.abs(self.gyrocorrection(channel)(data[channel])) for channel in channels]))
+  
+
+    ## Auxiliary functions
+
+    def conversion(self, smoothnessType: str):
         if (smoothnessType=="GYRO_LEFT"):
-
-            theta = data["CC16_1"] * 2 * np.pi / self.midiMax
-            phi = data["CC17_1"] * 2 * np.pi / self.midiMax
-            psi = data["CC18_1"] * 2 * np.pi / self.midiMax
-            # y = np.sin(theta)
-            # z = np.cos(theta)
-            # x = np.cos(phi)
-            # z = np.sin(phi)
-            # x = np.sin(psi)
-            # y = np.cos(psi)
-            x = np.cos(phi) + np.sin(psi)
-            y = np.sin(theta) + np.cos(psi)
-            z = np.cos(theta) + np.sin(phi)
-            return np.sqrt(x**2 + y**2 + z**2)
+            def fnc(data: dict[int, float]):
+                theta = data["CC16_1"] * 2 * np.pi / self.midiMax
+                phi = data["CC17_1"] * 2 * np.pi / self.midiMax
+                psi = data["CC18_1"] * 2 * np.pi / self.midiMax
+                x = np.cos(phi) + np.sin(psi)
+                y = np.sin(theta) + np.cos(psi)
+                z = np.cos(theta) + np.sin(phi)
+                return np.sqrt(x**2 + y**2 + z**2)
+            return fnc
+        
         elif (smoothnessType=="GYRO_RIGHT"):
-            theta = data["CC16_2"] * 2 * np.pi / self.midiMax
-            phi = data["CC17_2"] * 2 * np.pi / self.midiMax
-            psi = data["CC18_2"] * 2 * np.pi / self.midiMax
-            x = np.cos(phi) + np.sin(psi)
-            y = np.sin(theta) + np.cos(psi)
-            z = np.cos(theta) + np.sin(phi)
-            return np.sqrt(x**2 + y**2 + z**2)
+            def fnc(data: dict[int, float]):
+                theta = data["CC16_2"] * 2 * np.pi / self.midiMax
+                phi = data["CC17_2"] * 2 * np.pi / self.midiMax
+                psi = data["CC18_2"] * 2 * np.pi / self.midiMax
+                x = np.cos(phi) + np.sin(psi)
+                y = np.sin(theta) + np.cos(psi)
+                z = np.cos(theta) + np.sin(phi)
+                return np.sqrt(x**2 + y**2 + z**2)
+            return fnc
+        
         elif (smoothnessType=="VEL_LEFT"):
-            return data["CC22_1"] / self.midiMax
+            return lambda data : data["CC22_1"] / self.midiMax
         elif (smoothnessType=="VEL_RIGHT"):
-            return data["CC22_2"] / self.midiMax
+            return lambda data : data["CC22_2"] / self.midiMax
         elif (smoothnessType=="VEL_AVG"):
-            return (data["CC22_1"] + data["CC22_2"] ) / (2 * self.midiMax)
-        if (smoothnessType=="ACCEL_LEFT"):
-            ax = data["CC19_1"]  / self.midiMax
-            ay = data["CC20_1"]  / self.midiMax
-            az = data["CC21_1"]  / self.midiMax
-            return np.sqrt(ax**2 + ay**2 + az**2)
+            return lambda data : (data["CC22_1"] + data["CC22_2"] ) / (2 * self.midiMax)
+        elif (smoothnessType=="ACCEL_LEFT"):
+            def fnc(data: dict[int, float]):
+                ax = data["CC19_1"]  / self.midiMax
+                ay = data["CC20_1"]  / self.midiMax
+                az = data["CC21_1"]  / self.midiMax
+                return np.sqrt(ax**2 + ay**2 + az**2)
+            return fnc
         elif (smoothnessType=="ACCEL_RIGHT"):
-            ax = data["CC19_2"] / self.midiMax
-            ay = data["CC20_2"] / self.midiMax
-            az = data["CC21_2"] / self.midiMax
-            return np.sqrt(ax**2 + ay**2 + az**2)
+            def fnc(data: dict[int, float]):
+                ax = data["CC19_2"]  / self.midiMax
+                ay = data["CC20_2"]  / self.midiMax
+                az = data["CC21_2"]  / self.midiMax
+                return np.sqrt(ax**2 + ay**2 + az**2)
+            return fnc
+        elif (smoothnessType=="ACCEL_X"):
+            def fnc(data: dict[int, float]):
+                return self.smoothnessConversionTemplate(data, channels=["CC19_1", "CC19_2"], aggregationType="euclidean")
+        else:
+            raise Exception("please select a valid smoothness Type")
         
         
 
