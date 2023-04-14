@@ -1,5 +1,6 @@
 import numpy as np
 import time
+import copy 
 
 MIDI_MAX : int = 127
 
@@ -12,9 +13,13 @@ INITIAL_SIGMOID_CALIBRATION = {
 
 INITIAL_SMOOTHNESS_VALUES = {
                 "raw": 0,
+                "calibrationCount" : 0,
+                "calibrationStandardDevs": 2.5,
                 "calibration": INITIAL_SIGMOID_CALIBRATION,
+                "cache": np.zeros(0),
                 "calibratedSignal": 0,
                 "isCalibrated" : False}
+
 
 def sigmoid(x:float, YMAX:float, YMIN:float, XMAX:float, XMIN:float, BETA=0.02):
     """ Implements a simple sigmoid function
@@ -37,16 +42,30 @@ class SmoothnessBase():
     def __init__(self, 
         cacheLength: int,
         derivativeDegree: int,
-        alpha: float or list[float]):
+        alpha: float or list[float],
+        smoothnessCacheLength: int = 15,
+        autocalibrate: bool=True,
+        calibrationInterval: int = 10,
+        calibrationStandardDevs: float = 2):
+
+        self.autocalibrate = autocalibrate
+        self.calibrationInterval = calibrationInterval
 
         self.cacheLength = cacheLength
+        self.smoothnessCacheLength = smoothnessCacheLength
         self.derivativeDegree = derivativeDegree
         self.smoothness = np.zeros(self.derivativeDegree + 1)
+
         self.smoothnessMeasures = {
-            "overall": INITIAL_SMOOTHNESS_VALUES,
-            "relative": INITIAL_SMOOTHNESS_VALUES, 
-            "secondOrder": INITIAL_SMOOTHNESS_VALUES}
+            "overall": copy.deepcopy(INITIAL_SMOOTHNESS_VALUES),
+            "relative": copy.deepcopy(INITIAL_SMOOTHNESS_VALUES), 
+            "secondOrder": copy.deepcopy(INITIAL_SMOOTHNESS_VALUES)}
+        self.smoothnessMeasures["overall"]["calibrationStandardDevs"] = calibrationStandardDevs
+        self.smoothnessMeasures["relative"]["calibrationStandardDevs"] = calibrationStandardDevs
+        self.smoothnessMeasures["secondOrder"]["calibrationStandardDevs"] = calibrationStandardDevs
+
         self.derivatives = np.zeros((self.derivativeDegree + 1, self.cacheLength), float)  
+        
         self.deltas = np.zeros(cacheLength, float)
         if isinstance(alpha, list):
             if len(alpha) != self.derivativeDegree + 1:
@@ -95,6 +114,22 @@ class SmoothnessBase():
                 self.smoothnessMeasures[measure]["calibratedSignal"] = sigmoid(
                     x=self.smoothnessMeasures[measure]["raw"], 
                     **self.smoothnessMeasures[measure]["calibration"])
+            newCache = np.append(
+                    self.smoothnessMeasures[measure]["cache"],
+                    self.smoothnessMeasures[measure]["raw"]) 
+            self.smoothnessMeasures[measure]["cache"] = newCache
+
+            if (len(self.smoothnessMeasures[measure]["cache"])>self.smoothnessCacheLength):
+
+                firstIndex = len(self.smoothnessMeasures[measure]["cache"]) - self.smoothnessCacheLength
+                self.smoothnessMeasures[measure]["cache"] = self.smoothnessMeasures[measure]["cache"][firstIndex:]
+                ## is calibrated flag is on
+                if ((self.smoothnessMeasures[measure]["calibrationCount"] % self.calibrationInterval == 0) and self.autocalibrate):
+                    ## calibrate
+                    print('perform calibration')
+                    self.autocalibrateSignal(measure)
+                
+                self.smoothnessMeasures[measure]["calibrationCount"] += 1                
         
         
 
@@ -112,13 +147,11 @@ class SmoothnessBase():
         else:
             raise Exception("Cant have both new Delta and new Time")
 
-
-
-            
         self._addNewDelta(newDelta)
         newDerivatives = self._addNewDerivative(newValue, newDelta)
         self._addNewSmoothness(newDerivatives)
         self._updateSmoothnessMeasures()
+
 
         self.lastUpdateTime = newTime
 
@@ -129,6 +162,10 @@ class SmoothnessBase():
             "calibratedSignal": self.smoothnessMeasures[smoothnessMeasure]["calibratedSignal"]
         }
     
+
+    def stopAutocalibration(self):
+        self.autocalibrate = False
+        
     def calibrateSignal(self, XMAX:float, XMIN:float, BETA:float=0.02, YMIN:float=0, YMAX:float=MIDI_MAX, smoothnessMeasure: str="overall"):
         self.smoothnessMeasures[smoothnessMeasure]["calibration"] = {
             "XMAX": XMAX, 
@@ -136,13 +173,40 @@ class SmoothnessBase():
             "YMIN": YMIN,
             "YMAX": YMAX,
             "BETA": BETA}
-        self.smoothnessMeasures[smoothnessMeasure]["isCalibrated"] = True 
+        self.smoothnessMeasures[smoothnessMeasure]["isCalibrated"] = True
+    
+
+    def autocalibrateSignal(self, smoothnessMeasure: str="overall"):
+        
+        ## take the standard deviation of the cache
+        cache = self.smoothnessMeasures[smoothnessMeasure]["cache"]
+        
+        xmin = np.mean(cache) - self.smoothnessMeasures[smoothnessMeasure]["calibrationStandardDevs"] * np.std(cache)
+        xmax = np.mean(cache) + self.smoothnessMeasures[smoothnessMeasure]["calibrationStandardDevs"] * np.std(cache)
+
+        self.smoothnessMeasures[smoothnessMeasure]["calibration"]["XMIN"] = xmin
+        self.smoothnessMeasures[smoothnessMeasure]["calibration"]["XMAX"] = xmax
+
+        self.smoothnessMeasures[smoothnessMeasure]["isCalibrated"] = True
+
+    #         "XMAX": XMAX, 
+    #         "XMIN": XMIN, 
+    #         "YMIN": YMIN,
+    #         "YMAX": YMAX,
+    #         "BETA": BETA}
+    #     self.smoothnessMeasures[smoothnessMeasure]["isCalibrated"] = True 
 
     
     def decalibrateSignal(self, smoothnessMeasure: str="overall"):
         self.smoothnessMeasures[smoothnessMeasure]["isCalibrated"] = False 
 
 
+    def updateInsensitivity(self, sensitivity: float=2.5, smoothnessMeasure: str="all"):
+        smoothnessMeasures = list()
+        if (smoothnessMeasure=="all"):
+            smoothnessMeasures = ["overall", "relative", "secondOrder"]
+        for meas in smoothnessMeasures:
+            self.smoothnessMeasures[meas]["calibrationStandardDevs"] = sensitivity
 
 
 
@@ -185,7 +249,11 @@ class Smoothness():
             cacheLengths: None or int or list[int] = None, 
             derivativeDegrees: None or int or list[int] = None, 
             alphas: None or float or list[float] = None,
-            customMidiMax: None or int = None):
+            customMidiMax: None or int = None,
+            smoothnessCacheLength: int = 15,
+            autocalibrate: bool=True,
+            calibrationInterval: int = 10,
+            calibrationStandardDevs: float = 2):
         
         isNotAdmissibleSmoothnessType : bool = False
         if isinstance(smoothnessTypes, list):
@@ -212,7 +280,12 @@ class Smoothness():
         self.cacheLengths : dict[str, int] = {}
         self.derivativeDegrees : dict[str, int] = {}
         self.alphas : dict[str, float or list[float]] = {}
-
+        self.calibrationConfig = dict(
+            smoothnessCacheLength = smoothnessCacheLength,
+            autocalibrate = autocalibrate,
+            calibrationInterval = calibrationInterval,
+            calibrationStandardDevs = calibrationStandardDevs)
+        self.smoothnessConversion = {}
 
         if (cacheLengths is not None) and (derivativeDegrees is not None) and (alphas is not None): 
             if isinstance(cacheLengths,int):
@@ -223,26 +296,47 @@ class Smoothness():
                 alphas = [alphas] * len(self.smoothnessTypes)
 
             for tp, L, D, alpha in zip(self.smoothnessTypes, cacheLengths, derivativeDegrees, alphas):
-                self.initSmoothnessType(tp, L, D, alpha)
+
+                self.initSmoothnessType(
+                    smoothnessType=tp, 
+                    cacheLength=L, 
+                    derivativeDegree=D, 
+                    alpha=alpha, 
+                    calibrationConfig=self.calibrationConfig)
 
         ## Instance specific smoothness types
-        # self.smoothnessTypes = Sm##<#
-        self.smoothnessConversion = {smtype:self.conversion(smtype) for smtype in self.smoothnessTypes}
         self.channels = Smoothness.CHANNELS
 
-    def gyrocorrection(self, channel: str ):
+
+
+    def _gyrocorrection(self, channel: str ):
         if 'gyro' in self.channels[channel]:
             return lambda x: (np.sin(x) * 2 * np.pi / self.midiMax) 
         else :
             return lambda x: x
 
 
-    def initSmoothnessType(self, smoothnessType, cacheLength: int, derivativeDegree: int, alpha: float or list[float]):
-        if smoothnessType not in self.smoothnessTypes:
+    def initSmoothnessType(
+            self, 
+            smoothnessType, 
+            cacheLength: int, 
+            derivativeDegree: int, 
+            alpha: float or list[float],
+            calibrationConfig: dict
+            ):
+        if smoothnessType not in self.smoothnessTypes and smoothnessType not in Smoothness.SMOOTHNESS_TYPES:
             raise Smoothness.NotAdmissibleType
         if smoothnessType in self.data:
             raise Exception("Cannot add this type. It's already been added.")
-        self.data[smoothnessType] = SmoothnessBase(cacheLength, derivativeDegree, alpha)
+        self.data[smoothnessType] = SmoothnessBase(
+            cacheLength=cacheLength, 
+            derivativeDegree=derivativeDegree, 
+            alpha=alpha,
+            **calibrationConfig)
+        if (smoothnessType not in self.smoothnessTypes):
+            self.smoothnessTypes.append(smoothnessType)
+        if (smoothnessType not in self.smoothnessConversion):
+            self.smoothnessConversion[smoothnessType] = self.conversion(smoothnessType)
         self.cacheLengths[smoothnessType] = cacheLength
         self.derivativeDegrees[smoothnessType] = derivativeDegree
         self.alphas[smoothnessType] = alpha
@@ -253,7 +347,9 @@ class Smoothness():
             del self.data[smoothnessType] 
             del self.cacheLengths[smoothnessType] 
             del self.derivativeDegrees[smoothnessType] 
-            del self.alphas[smoothnessType]     
+            del self.alphas[smoothnessType]   
+            del self.smoothnessConversion[smoothnessType]  
+            self.smoothnessTypes.remove(smoothnessType)
 
 
     def addNewValues(self, 
@@ -291,6 +387,33 @@ class Smoothness():
             for sT, minMAx in zip(smoothnessTypes, minsAndMaxs):
                 self.data[sT].calibrateSignal(XMIN=minMAx[0], XMAX=minMAx[1], smoothnessMeasure=smoothnessMeasure)
 
+    def __getSmoothnessTypesFromArgument(self, smoothnessTypes: str or list[str]='all'):
+        if smoothnessTypes=='all':
+            smoothnessTypes = list(self.data.keys())
+        elif isinstance(smoothnessTypes, list):
+            smoothnessTypes = smoothnessTypes
+        else: 
+            smoothnessTypes = [smoothnessTypes]
+        return smoothnessTypes
+
+    def stopAutocalibration(self, smoothnessTypes: str or list[str]='all'):
+        smoothnessTypes = self.__getSmoothnessTypesFromArgument(smoothnessTypes)
+        for smtype in smoothnessTypes :
+            self.data[smtype].stopAutocalibration()
+
+    def updateInsensitivityForAutocalibration(self, smoothnessTypes: str or list[str]='all', newInsensitivities: float or list[float]=2.5):
+        smoothnessTypes = self.__getSmoothnessTypesFromArgument(smoothnessTypes)
+        insensitivities = list()
+        if isinstance(newInsensitivities, list):
+            insensitivities = newInsensitivities
+        else: 
+            insensitivities = [newInsensitivities]*len(smoothnessTypes)
+        
+        if len(insensitivities)!= len(smoothnessTypes):
+            raise Exception("Every chosen smoothness type should have one new insensitivity")
+
+        for smtype, insensitivity in zip(smoothnessTypes, insensitivities) :
+            self.data[smtype].updateInsensitivity(insensitivity)
 
     def changeCurrentDefaultSmoothnessMeasure(self, newSmoothnessMeasure="overall"):
         self.currentDefaultSmoothnessMeasure = newSmoothnessMeasure
@@ -298,27 +421,23 @@ class Smoothness():
     def addChannel(self, name: str, description: str):
         self.channels[name] = description
 
-    def removeChannel(self, name: str, description: str):
+    def removeChannel(self, name: str):
         del self.channels[name]
 
     def addSmoothnessType(self, name: str, function):
         self.smoothnessTypes.append(name)
         self.smoothnessConversion[name] = function
 
-    def addAndInitSmoothnessType(self, name: str, function, smoothnessType, cacheLength: int, derivativeDegree: int, alpha: float or list[float]):
+    def addAndInitSmoothnessType(self, name: str, function, cacheLength: int, derivativeDegree: int, alpha: float or list[float], calibrationConfig: dict):
         self.addSmoothnessType(name, function)
-        self.initSmoothnessType(name, cacheLength=cacheLength, derivativeDegree=derivativeDegree, alpha=alpha)
+        self.initSmoothnessType(name, cacheLength=cacheLength, derivativeDegree=derivativeDegree, alpha=alpha, calibrationConfig= calibrationConfig)
 
-    def removeSmoothnessType(self, name:str ):
-        del self.smoothnessConversion[name]
-        ## remove from a list
-        self.smoothnessTypes.remove(name)
 
     def smoothnessConversionTemplate(self, data: dict[int, float], channels: list[str]= [], aggregationType: str="euclidean"):
         if aggregationType=="euclidean":
-            return np.sqrt(np.sum(np.array([self.gyrocorrection(channel)(data[channel]) for channel in channels])**2))
+            return np.sqrt(np.sum(np.array([self._gyrocorrection(channel)(data[channel]) for channel in channels])**2))
         if aggregationType=="linear":
-            return np.sum(np.array([np.abs(self.gyrocorrection(channel)(data[channel])) for channel in channels]))
+            return np.sum(np.array([np.abs(self._gyrocorrection(channel)(data[channel])) for channel in channels]))
   
 
     ## Auxiliary functions
